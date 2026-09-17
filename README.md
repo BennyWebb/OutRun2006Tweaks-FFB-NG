@@ -1,6 +1,12 @@
 # OutRun2006Tweaks
 [![GitHub Downloads](https://img.shields.io/github/downloads/emoose/OutRun2006Tweaks/total)](https://github.com/emoose/OutRun2006Tweaks/releases)
 
+> [!IMPORTANT]
+> This is an unofficial personal experimental fork of emoose's OutRun2006Tweaks,
+> focused on adding steering-wheel force-feedback support. It is not an official
+> OutRun2006Tweaks release; please report issues specific to this fork here rather
+> than to the upstream maintainer.
+
 A wrapper DLL that can patch in fixes & tweaks into OutRun 2006: Coast 2 Coast.
 
 Latest releases can be found under the releases section: https://github.com/emoose/OutRun2006Tweaks/releases

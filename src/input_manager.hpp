@@ -266,6 +266,10 @@ private:
 	std::mutex mtx;
 	std::vector<SDL_Gamepad*> controllers;
 	int primaryControllerIndex = -1;
+	// Steering as read from the active binding, before the game's optional
+	// sensitivity curve. Kept separately for telemetry; gameplay continues to
+	// consume the existing volumes cache unchanged.
+	float physicalSteering = 0.0f;
 
 	SDL_Window* window = nullptr;
 
@@ -830,6 +834,9 @@ public:
 		for (size_t i = 0; i < volumeBindings.size(); ++i)
 		{
 			auto& vol = volumeBindings[i].update(gamepad);
+			if (i == int(ADChannel::Steering))
+				physicalSteering = std::clamp(vol.currentValue, -1.0f, 1.0f);
+
 			if (Overlay::IsBindingDialogActive || Overlay::IsActive) [[unlikely]]
 				continue;
 
@@ -1124,6 +1131,11 @@ public:
 		return int(ceil(state.previousValue * 255.0f));
 	}
 
+	float physicalSteeringNormalized() const
+	{
+		return physicalSteering;
+	}
+
 	bool SwitchOn(uint32_t switches)
 	{
 		return (switch_previous & switches) != switches && (switch_current & switches) == switches;
@@ -1145,3 +1157,4 @@ void InputManager_Update();
 bool InputManager_ModActionHeld(ModAction action);
 std::string InputManager_ModActionDisplayName(ModAction action);
 void InputManager_SetVibration(WORD left, WORD right);
+float InputManager_GetPhysicalSteering();

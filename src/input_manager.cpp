@@ -84,6 +84,11 @@ void InputManager_SetVibration(WORD left, WORD right)
 	InputManager::instance.setVibration(left, right);
 }
 
+float InputManager_GetPhysicalSteering()
+{
+	return InputManager::instance.physicalSteeringNormalized();
+}
+
 class NewInputHook : public Hook
 {
 	inline static SafetyHookInline SwitchOn_hook = {};

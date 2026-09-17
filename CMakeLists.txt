@@ -288,6 +288,8 @@ set(outrun2006tweaks_SOURCES
 	"src/Resource.rc"
 	"src/dllmain.cpp"
 	"src/exception.hpp"
+	"src/ffb/telemetry.cpp"
+	"src/ffb/telemetry.hpp"
 	"src/game.hpp"
 	"src/game_addrs.hpp"
 	"src/hook_mgr.cpp"

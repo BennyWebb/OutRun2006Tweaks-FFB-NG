@@ -98,6 +98,8 @@ namespace Settings
 
 	extern Setting<bool> UseNewInput;                      // input_manager.cpp
 	extern Setting<bool> BypassGameSensitivity;            // input_manager.cpp
+	extern Setting<float> GamepadSteeringDeadZone;          // input_manager.cpp
+	extern Setting<float> JoystickSteeringDeadZone;         // input_manager.cpp
 	extern Setting<float> SteeringDeadZone;                // hooks_input.cpp
 	extern Setting<bool> ControllerHotPlug;                // hooks_input.cpp
 	extern Setting<int> ImpulseVibrationMode;              // hooks_input.cpp

@@ -24,6 +24,28 @@
 //
 namespace InputNames
 {
+	inline const char* iniNameForHat(Uint8 mask)
+	{
+		switch (mask)
+		{
+		case SDL_HAT_UP: return "Up";
+		case SDL_HAT_DOWN: return "Down";
+		case SDL_HAT_LEFT: return "Left";
+		case SDL_HAT_RIGHT: return "Right";
+		default: return "Unknown";
+		}
+	}
+
+	inline const char* displayNameForHat(Uint8 mask) { return iniNameForHat(mask); }
+
+	inline std::optional<Uint8> hatFromIni(std::string_view name)
+	{
+		for (Uint8 mask : { Uint8(SDL_HAT_UP), Uint8(SDL_HAT_DOWN), Uint8(SDL_HAT_LEFT), Uint8(SDL_HAT_RIGHT) })
+			if (!stricmp(iniNameForHat(mask), std::string(name).c_str()))
+				return mask;
+		return std::nullopt;
+	}
+
 	enum class PadStyle { Xbox, PlayStation, Nintendo };
 
 	inline PadStyle styleFor(SDL_GamepadType type)

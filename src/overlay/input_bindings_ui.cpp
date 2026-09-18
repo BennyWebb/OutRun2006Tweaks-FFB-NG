@@ -92,6 +92,7 @@ private:
 	Selection bindTarget;
 	int bindIndex = -1;
 	std::string bindingName;
+	std::vector<Sint16> joystickAxisBaseline;
 
 	// Track binding changes (options tab are handled differently)
 	bool unsavedChanges = false;
@@ -124,6 +125,14 @@ private:
 		bindTarget = target;
 		bindIndex = index;
 		bindingName = name_for(target);
+		joystickAxisBaseline.clear();
+		if (auto* joystick = InputManager::instance.getPrimaryJoystick())
+		{
+			const int count = SDL_GetNumJoystickAxes(joystick);
+			joystickAxisBaseline.reserve(count);
+			for (int i = 0; i < count; ++i)
+				joystickAxisBaseline.push_back(SDL_GetJoystickAxis(joystick, i));
+		}
 	}
 
 public:
@@ -214,6 +223,39 @@ public:
 				}
 			}
 		}
+		else if (auto* joystick = InputManager::instance.getPrimaryJoystick())
+		{
+			for (int i = 0; i < SDL_GetNumJoystickButtons(joystick); ++i)
+				if (SDL_GetJoystickButton(joystick, i))
+				{
+					commit(InputBinding::joystickButton(i));
+					return true;
+				}
+
+			for (int i = 0; i < SDL_GetNumJoystickHats(joystick); ++i)
+			{
+				const Uint8 value = SDL_GetJoystickHat(joystick, i);
+				for (Uint8 direction : { Uint8(SDL_HAT_UP), Uint8(SDL_HAT_DOWN), Uint8(SDL_HAT_LEFT), Uint8(SDL_HAT_RIGHT) })
+					if ((value & direction) == direction)
+					{
+						commit(InputBinding::joystickHat(i, direction));
+						return true;
+					}
+			}
+
+			constexpr int AxisMovementThreshold = 8192;
+			for (int i = 0; i < int(joystickAxisBaseline.size()); ++i)
+			{
+				const Sint16 value = SDL_GetJoystickAxis(joystick, i);
+				const int movement = int(value) - int(joystickAxisBaseline[i]);
+				if (std::abs(movement) >= AxisMovementThreshold)
+				{
+					commit(InputBinding::joystickAxis(i, !is_steering(bindTarget),
+						joystickAxisBaseline[i], movement > 0 ? 1 : -1));
+					return true;
+				}
+			}
+		}
 
 		return false;
 	}
@@ -270,6 +312,7 @@ private:
 		ImGui::SeparatorText(name_for(selected).c_str());
 
 		int removeIndex = -1;
+		int visibleBindingCount = 0;
 
 		if (ImGui::BeginTable("##bindings", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit))
 		{
@@ -280,6 +323,12 @@ private:
 			for (int i = 0; i < int(bindings.size()); i++)
 			{
 				InputBinding& binding = bindings[i];
+				const auto* device = InputManager::instance.getPrimaryDevice();
+				const bool activeProfile = binding.isKeyboard() || (device &&
+					(device->kind == InputDeviceKind::Gamepad ? binding.isGamepad() : binding.isJoystick()));
+				if (!activeProfile)
+					continue;
+				++visibleBindingCount;
 
 				ImGui::PushID(i);
 				ImGui::TableNextRow();
@@ -289,7 +338,7 @@ private:
 				ImGui::TableNextColumn();
 				const std::string label = std::format("{}  ({})",
 					binding.displayName(padType, steering),
-					binding.isKeyboard() ? "keyboard" : "controller");
+					binding.isKeyboard() ? "keyboard" : (binding.isGamepad() ? "gamepad" : "joystick"));
 
 				if (ImGui::Button(label.c_str(), ImVec2(-FLT_MIN, 0)))
 					begin_listening(selected, i);
@@ -325,7 +374,7 @@ private:
 			unsavedChanges = true;
 		}
 
-		if (bindings.empty())
+		if (visibleBindingCount == 0)
 			ImGui::TextDisabled("Nothing bound.");
 
 		if (ImGui::Button("+ Add binding"))
@@ -353,17 +402,19 @@ private:
 
 		for (size_t i = 0; i < manager.controllers.size(); i++)
 		{
-			auto* controller = manager.controllers[i];
+			auto& controller = manager.controllers[i];
 			const bool primary = int(i) == manager.primaryControllerIndex;
 
 			ImGui::PushID(int(i));
-			if (ImGui::RadioButton(SDL_GetGamepadName(controller), primary))
-				manager.setPrimaryGamepad(i);
+			const std::string label = std::format("{}    {}", controller.name,
+				controller.kind == InputDeviceKind::Gamepad ? "Gamepad" : "Joystick");
+			if (ImGui::RadioButton(label.c_str(), primary))
+				manager.setPrimaryDevice(i);
 			ImGui::PopID();
 		}
 
 		ImGui::Spacing();
-		ImGui::TextDisabled("Bindings apply to whichever controller is selected.");
+		ImGui::TextDisabled("The selected device's profile and shared keyboard bindings are active.");
 	}
 
 	// These are tweaks settings rather than bindings, so they go to the tweaks INI
@@ -401,11 +452,18 @@ private:
 		if (ImGui::Combo("Impulse Vibration", Settings::ImpulseVibrationMode.ptr(), vibrationModes, IM_ARRAYSIZE(vibrationModes)))
 			setting_changed(Settings::ImpulseVibrationMode);
 
-		int deadzonePercent = int(Settings::SteeringDeadZone * 100.f);
-		if (ImGui::SliderInt("Steering Deadzone", &deadzonePercent, 5, 20, "%d%%"))
+		int gamepadDeadzonePercent = int(std::round(Settings::GamepadSteeringDeadZone * 100.f));
+		if (ImGui::SliderInt("Gamepad Steering Deadzone", &gamepadDeadzonePercent, 0, 30, "%d%%"))
 		{
-			Settings::SteeringDeadZone = float(deadzonePercent) / 100.f;
-			setting_changed(Settings::SteeringDeadZone);
+			Settings::GamepadSteeringDeadZone = float(gamepadDeadzonePercent) / 100.f;
+			setting_changed(Settings::GamepadSteeringDeadZone);
+		}
+
+		int joystickDeadzonePercent = int(std::round(Settings::JoystickSteeringDeadZone * 100.f));
+		if (ImGui::SliderInt("Joystick Steering Deadzone", &joystickDeadzonePercent, 0, 30, "%d%%"))
+		{
+			Settings::JoystickSteeringDeadZone = float(joystickDeadzonePercent) / 100.f;
+			setting_changed(Settings::JoystickSteeringDeadZone);
 		}
 
 		if (ImGui::Checkbox("Bypass Sensitivity", Settings::BypassGameSensitivity.ptr()))
@@ -556,8 +614,10 @@ public:
 				else
 				{
 					unsavedChanges = true;
-					Settings::SteeringDeadZone = 0.2f;
-					setting_changed(Settings::SteeringDeadZone);
+					Settings::GamepadSteeringDeadZone = 0.20f;
+					setting_changed(Settings::GamepadSteeringDeadZone);
+					Settings::JoystickSteeringDeadZone = 0.00f;
+					setting_changed(Settings::JoystickSteeringDeadZone);
 					Settings::BypassGameSensitivity = false;
 					setting_changed(Settings::BypassGameSensitivity);
 					manager.setupDefaultBindings();

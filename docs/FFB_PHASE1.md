@@ -6,9 +6,10 @@ be the input boundary for a later force model.
 
 ## Steering source
 
-With `UseNewInput=true`, steering is captured from the active SDL steering
-binding after `SteeringDeadZone` but before OutRun's optional sensitivity
-curve. With `UseNewInput=false`, the module calls OutRun's existing
+With `UseNewInput=true`, steering is captured from the selected SDL Gamepad or
+generic SDL Joystick steering profile (plus the shared keyboard profile), after
+its device-specific steering deadzone but before OutRun's optional sensitivity curve. With
+`UseNewInput=false`, the module calls OutRun's existing
 `GetVolume(Steering)` function and normalizes its signed `-127..127` result.
 Both paths report approximately `-1` at full left, `0` at centre and `+1` at
 full right without changing the value delivered to the game.

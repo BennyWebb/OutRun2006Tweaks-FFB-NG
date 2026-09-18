@@ -195,6 +195,23 @@ namespace Settings
 		return sorted;
 	}
 
+	static SettingBase* find_setting(std::string_view section, std::string_view key)
+	{
+		for (SettingBase* setting : SettingBase::registry())
+			if (!_stricmp(setting->section().data(), section.data()) &&
+				!_stricmp(setting->key().data(), key.data()))
+				return setting;
+		return nullptr;
+	}
+
+	static void seed_gamepad_deadzone_from_legacy()
+	{
+		SettingBase* legacy = find_setting("Controls", "SteeringDeadZone");
+		SettingBase* gamepad = find_setting("Controls", "GamepadSteeringDeadZone");
+		if (legacy && gamepad && gamepad->set_from_string(legacy->to_string()))
+			spdlog::info("GamepadSteeringDeadZone absent; using legacy SteeringDeadZone={}", legacy->to_string());
+	}
+
 	bool read(const std::filesystem::path& iniPath)
 	{
 		spdlog::info("Settings::read - reading INI from {}", iniPath.string());
@@ -213,6 +230,24 @@ namespace Settings
 		for (SettingBase* setting : SettingBase::registry())
 			setting->read(ini);
 
+		// Migrate one INI layer at a time. This lets an old user.ini override the
+		// shipped GamepadSteeringDeadZone while an explicit new key always wins.
+		try
+		{
+			const auto controls = ini.Get("Controls");
+			const auto hasKey = [&controls](const char* wanted)
+			{
+				return std::any_of(controls.begin(), controls.end(), [wanted](const auto& entry)
+					{ return !_stricmp(entry.first.c_str(), wanted); });
+			};
+			if (hasKey("SteeringDeadZone") && !hasKey("GamepadSteeringDeadZone"))
+				seed_gamepad_deadzone_from_legacy();
+		}
+		catch (const std::runtime_error&)
+		{
+			// No Controls section in this layer.
+		}
+
 		// INIReader doesn't preserve the order of the keys/values in a section
 		// Will need to try opening INI ourselves to grab cd tracks...
 		CDSwitcher_ReadIni(iniPath);
@@ -223,6 +258,8 @@ namespace Settings
 	bool read_cmd_line(int argc, wchar_t** argv)
 	{
 		bool changed = false;
+		bool legacyDeadzoneOverride = false;
+		bool gamepadDeadzoneOverride = false;
 
 		for (int i = 1; i < argc; ++i)
 		{
@@ -257,6 +294,9 @@ namespace Settings
 
 				WideCharToMultiByte(CP_UTF8, 0, value.data(), int(value.size()), valueUtf8.data(), valueSize, nullptr, nullptr);
 
+				legacyDeadzoneOverride |= !_stricmp(keyUtf8.c_str(), "SteeringDeadZone");
+				gamepadDeadzoneOverride |= !_stricmp(keyUtf8.c_str(), "GamepadSteeringDeadZone");
+
 				for (SettingBase* setting : SettingBase::registry())
 				{
 					if (_stricmp(setting->key().data(), keyUtf8.c_str()) != 0)
@@ -279,6 +319,9 @@ namespace Settings
 				continue;
 			}
 		}
+
+		if (legacyDeadzoneOverride && !gamepadDeadzoneOverride)
+			seed_gamepad_deadzone_from_legacy();
 
 		return changed;
 	}

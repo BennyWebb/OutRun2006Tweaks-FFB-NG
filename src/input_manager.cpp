@@ -13,6 +13,10 @@ namespace Settings
 	Setting<bool> BypassGameSensitivity{ "Controls", "BypassGameSensitivity", false,
 		"Passes steering input to the game directly instead of through its own sensitivity curve, allowing for more "
 		"sensitive controls. Only used when UseNewInput is enabled." };
+	Setting<float> GamepadSteeringDeadZone{ "Controls", "GamepadSteeringDeadZone", 0.20f,
+		"Steering deadzone for mapped SDL Gamepads when UseNewInput is enabled.", Range<float>{ 0.f, 0.30f } };
+	Setting<float> JoystickSteeringDeadZone{ "Controls", "JoystickSteeringDeadZone", 0.00f,
+		"Steering deadzone for generic SDL Joysticks when UseNewInput is enabled.", Range<float>{ 0.f, 0.30f } };
 }
 
 InputManager InputManager::instance;
@@ -25,7 +29,20 @@ void InputManager::init(HWND hwnd)
 	SDL_SetHint(SDL_HINT_JOYSTICK_DIRECTINPUT, Settings::InputBackend == 2 ? "1" : "0");
 	SDL_SetHint(SDL_HINT_XINPUT_ENABLED, Settings::InputBackend == 3 ? "1" : "0");
 
-	SDL_Init(SDL_INIT_GAMEPAD | SDL_INIT_VIDEO);
+	if (!SDL_Init(SDL_INIT_GAMEPAD | SDL_INIT_JOYSTICK | SDL_INIT_VIDEO))
+	{
+		spdlog::error(__FUNCTION__ ": SDL initialization failed: {}", SDL_GetError());
+		return;
+	}
+
+	int joystickCount = 0;
+	if (SDL_JoystickID* joystickIds = SDL_GetJoysticks(&joystickCount))
+	{
+		for (int i = 0; i < joystickCount; ++i)
+			onControllerAdded(joystickIds[i]);
+		SDL_free(joystickIds);
+	}
+	spdlog::info(__FUNCTION__ ": discovered {} SDL input device(s)", controllers.size());
 
 	// Need to setup SDL_Window for SDL to see keyboard events
 	SDL_PropertiesID props = SDL_CreateProperties();

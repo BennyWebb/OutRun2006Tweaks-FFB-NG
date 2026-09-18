@@ -14,7 +14,8 @@
 namespace Settings
 {
 	Setting<float> SteeringDeadZone{ "Controls", "SteeringDeadZone", 0.2f,
-		"Allows overriding the steering deadzone. Game default is 0.2 / 20%.", Range<float>{ 0.f, 1.f } };
+		"Legacy input steering deadzone. Also seeds GamepadSteeringDeadZone when that newer key is absent. "
+		"Game default is 0.2 / 20%.", Range<float>{ 0.f, 1.f } };
 	Setting<bool> ControllerHotPlug{ "Controls", "ControllerHotPlug", false,
 		"Allows game to detect newly plugged in devices, rather than needing a restart. May have issues with some "
 		"controllers/wheels, and is ignored when using UseNewInput as hot-plug is supported by it by default." };

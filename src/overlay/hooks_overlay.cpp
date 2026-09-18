@@ -8,6 +8,7 @@
 #include <backends/imgui_impl_win32.h>
 #include <backends/imgui_impl_dx9.h>
 #include "overlay.hpp"
+#include "ffb/constant_force.hpp"
 
 namespace Settings
 {
@@ -286,6 +287,9 @@ class WndprocHook : public Hook
 	inline static SafetyHookInline dest_orig = {};
 	static LRESULT __stdcall destination(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	{
+		if (msg == WM_CLOSE || msg == WM_DESTROY)
+			FFB::StopOutputForExit();
+
 		if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam))
 			return 1;
 

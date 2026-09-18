@@ -39,6 +39,12 @@ enum class ListenState
 
 inline ListenState isListeningForInput = ListenState::False;
 
+namespace FFB
+{
+	// Called before SDL closes a joystick during a normal runtime removal.
+	void OnInputDeviceRemoved(SDL_JoystickID instanceId);
+}
+
 // Actions belonging to the mod rather than the game.
 enum class ModAction
 {
@@ -527,6 +533,7 @@ private:
 
 		if (it != controllers.end())
 		{
+			FFB::OnInputDeviceRemoved(instanceId);
 			Game::CurrentPadType = Game::GamepadType::PC;
 
 			const bool removedPrimary = previousPrimary == instanceId;
@@ -1349,3 +1356,5 @@ bool InputManager_ModActionHeld(ModAction action);
 std::string InputManager_ModActionDisplayName(ModAction action);
 void InputManager_SetVibration(WORD left, WORD right);
 float InputManager_GetPhysicalSteering();
+SDL_Joystick* InputManager_GetPrimaryJoystick();
+SDL_JoystickID InputManager_GetPrimaryJoystickId();

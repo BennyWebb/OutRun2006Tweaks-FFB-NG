@@ -1,15 +1,15 @@
 # Force-feedback telemetry foundation (Phase 1)
 
-Phase 1 is diagnostic only. It creates no DirectInput effects and sends no
-commands to a wheel motor. Its output is a `FFB::TelemetrySnapshot` intended to
-be the input boundary for a later force model.
+Phase 1 is the diagnostic telemetry foundation. Its output is a
+`FFB::TelemetrySnapshot` used as the input boundary by the separately
+documented Phase 2 output module.
 
 ## Steering source
 
 With `UseNewInput=true`, steering is captured from the selected SDL Gamepad or
 generic SDL Joystick steering profile (plus the shared keyboard profile), after
-its device-specific steering deadzone but before OutRun's optional sensitivity curve. With
-`UseNewInput=false`, the module calls OutRun's existing
+its device-specific steering deadzone but before OutRun's optional sensitivity
+curve. With `UseNewInput=false`, the module calls OutRun's existing
 `GetVolume(Steering)` function and normalizes its signed `-127..127` result.
 Both paths report approximately `-1` at full left, `0` at centre and `+1` at
 full right without changing the value delivered to the game.
@@ -27,35 +27,68 @@ the present confidence level:
 
 | Snapshot field | Game source | Confidence |
 | --- | --- | --- |
-| `speed` | `EVWORK_CAR+0x1C4` | Medium: reference fork behavior; scale remains normalized/unknown |
+| `speed` | `EVWORK_CAR+0x1C4` | High for relative speed: physically validated against acceleration, cruising and stopping; units remain unknown |
 | `lateralA/B` | `+0x264`, `+0x268` | Low/medium: correlated with slide in the reference fork; physical units unknown |
 | `driftCandidate` | magnitude derived from the two lateral candidates | Low: diagnostic heuristic only |
 | `surface[4]` | `+0x24C..0x258` | Medium: used as per-wheel surface masks by the game's vibration path |
 | `roadCollisionType` | `OnRoadPlace+0x00` | Medium: used by the game's surface lookup; exact enum unknown |
-| `gear` | `+0x208` | Medium/high: reference fork observation, easy to verify against HUD |
+| `gear` | `+0x208` | High: physically validated against the HUD; not used by the Phase 2A force model |
 | `stateFlags`, `collisionByte` | `+0x08`, `+0x281` | Low: raw candidates logged for collision correlation |
 
-No candidate is used to generate force. Raw values are retained in logs so
-their interpretation can be confirmed or rejected through gameplay tests.
+Phase 2A uses only the physically validated relative `speed` candidate. No
+lateral, drift, surface, collision or gear candidate is used to generate
+force. `lateralCombined` and `driftCandidate` are explicitly derived heuristics; every value prefixed
+`raw.` in the log is read directly from the documented candidate field. Raw
+values are retained so their interpretation can be confirmed or rejected
+through gameplay tests.
+
+## Diagnostic log format
+
+When `FFBDiagnosticLog=true`, three lines with the same `window` number are
+written every 60 player-car simulation updates (approximately once per
+second):
+
+```text
+FFB DIAG INPUT window=N samples=60 physicalSteer.cur=... physicalSteer.range=[min,max] steeringRate.filtered.cur=.../s steeringRate.filtered.range=[min,max]/s
+FFB DIAG VEHICLE window=N inGameplay=... raw.speedCandidate=... raw.lateralA=... raw.lateralB=... derived.lateralSum=... derived.driftHeuristic=... raw.gearCandidate=...
+FFB DIAG CONTACT window=N raw.wheelSurfaceMask=[0:0x...,1:0x...,2:0x...,3:0x...] raw.roadCollisionType=decimal(hex) raw.stateFlags=0x... raw.collisionByte=decimal(hex)
+```
+
+Wheel surface slots remain numbered because their physical wheel ordering has
+not been verified. Unknown masks and flags are printed in hexadecimal; the
+road/collision byte candidates are also printed in decimal for easier change
+comparison. Disabling and re-enabling diagnostics starts a fresh steering
+range window, so the first window does not incorrectly assume the wheel passed
+through zero.
 
 ## Diagnostic procedure
 
 1. Set `FFBDiagnosticLog=true` in the `[FFB]` section, or enable it in the F11
    settings overlay. Restarting is not required.
-2. Start a race and open `OutRun2006Tweaks.log`. A line beginning `FFB DIAG`
-   is written once per 60 simulation ticks (approximately once per second).
-   `steerRange` and `rateRange` retain movement that occurred between lines.
-3. While stopped, move the wheel to full left, centre and full right, holding
-   each position for at least two log lines. Confirm `physicalSteer` approaches
-   `-1`, `0`, `+1`; confirm `steerRate` changes with motion and decays to zero
-   while held.
-4. Accelerate through several gears and compare `speed` and `gear` with the
-   HUD. Brake to a stop and confirm speed returns near its stationary value.
-5. Drive steady asphalt, grass/sand, water if available, and a sustained drift.
-   Record which raw surface/lateral values change in each controlled state.
-6. Make one light barrier scrape and one direct collision. Compare
-   `stateFlags`, `collisionByte`, lateral values and speed before/during/after.
-7. Repeat steps 3-6 with both `UseNewInput=true` and `false` if legacy input
-   compatibility is required. Confirm normal steering, pedals and deadzone are
-   unchanged in both modes.
-8. Disable `FFBDiagnosticLog` after capture to stop periodic logging.
+2. Start a race, stop the car on a level road, and open
+   `OutRun2006Tweaks.log`. Match the three lines for each sample using their
+   shared `window` number.
+3. Stationary steering test: centre and hold; turn approximately 90 degrees
+   left and hold; return to centre; turn approximately 90 degrees right and
+   hold; rapidly steer left/right; finally hold the wheel off-centre. Hold each
+   static position for at least two windows. Check that `physicalSteer.cur` and
+   its range follow the wheel, while filtered steering rate reacts during
+   motion and decays approximately to zero while held.
+4. Driving test: accelerate gradually through several gears, cruise steadily,
+   then brake to a stop. Compare `raw.speedCandidate` and `raw.gearCandidate`
+   against the speedometer, vehicle motion, and HUD gear indication.
+5. Drive a sustained left bend and a sustained right bend. Compare the sign,
+   magnitude, and repeatability of `raw.lateralA`, `raw.lateralB`, and the
+   derived values. Attempt a deliberate drift if practical and safe, recording
+   whether the same candidates distinguish it from ordinary cornering.
+6. Drive from asphalt onto grass, sand, or another off-road surface and back.
+   Record every `raw.wheelSurfaceMask` slot and `raw.roadCollisionType` before,
+   during, and after the transition. Do not assign wheel positions or surface
+   meanings until the changes repeat reliably.
+7. Perform one light barrier scrape, allow values to settle, then one direct
+   collision. Compare `raw.stateFlags`, `raw.collisionByte`,
+   `raw.roadCollisionType`, lateral candidates, and speed around each event.
+8. Repeat observations before treating any candidate as verified. Repeat with
+   `UseNewInput=false` only if legacy input compatibility also needs testing;
+   physical steering must still remain distinct from vehicle-state telemetry.
+9. Disable `FFBDiagnosticLog` after capture to stop periodic logging.

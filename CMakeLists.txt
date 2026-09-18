@@ -288,6 +288,8 @@ set(outrun2006tweaks_SOURCES
 	"src/Resource.rc"
 	"src/dllmain.cpp"
 	"src/exception.hpp"
+	"src/ffb/constant_force.cpp"
+	"src/ffb/constant_force.hpp"
 	"src/ffb/telemetry.cpp"
 	"src/ffb/telemetry.hpp"
 	"src/game.hpp"

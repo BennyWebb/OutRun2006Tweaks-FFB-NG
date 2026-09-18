@@ -1,4 +1,5 @@
 #include "input_manager.hpp"
+#include "ffb/constant_force.hpp"
 
 namespace Settings
 {
@@ -69,6 +70,11 @@ void InputManager_Update()
 {
 	if (Settings::UseNewInput)
 		InputManager::instance.update();
+
+	// This broad simulation tick continues in menus, unlike the player-car
+	// telemetry hook. It is therefore the watchdog that clears any stale force
+	// as soon as gameplay stops.
+	FFB::RuntimeTick();
 }
 
 // Only meaningful with the new input system; callers fall back to their own
@@ -104,6 +110,17 @@ void InputManager_SetVibration(WORD left, WORD right)
 float InputManager_GetPhysicalSteering()
 {
 	return InputManager::instance.physicalSteeringNormalized();
+}
+
+SDL_Joystick* InputManager_GetPrimaryJoystick()
+{
+	return InputManager::instance.getPrimaryJoystick();
+}
+
+SDL_JoystickID InputManager_GetPrimaryJoystickId()
+{
+	auto* device = InputManager::instance.getPrimaryDevice();
+	return device && device->kind == InputDeviceKind::Joystick ? device->instanceId : 0;
 }
 
 class NewInputHook : public Hook

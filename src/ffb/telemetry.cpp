@@ -3,6 +3,7 @@
 #endif
 
 #include "telemetry.hpp"
+#include "constant_force.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -101,36 +102,68 @@ namespace FFB
 
 		void LogSnapshot()
 		{
-			static uint32_t ticksSinceLog = 0;
-			static float steerMin = 0.0f;
-			static float steerMax = 0.0f;
-			static float rateMin = 0.0f;
-			static float rateMax = 0.0f;
-			if (!Settings::FFBDiagnosticLog)
-				return;
+			struct DiagnosticWindow
+			{
+				uint64_t number = 0;
+				uint32_t samples = 0;
+				float steerMin = 0.0f;
+				float steerMax = 0.0f;
+				float rateMin = 0.0f;
+				float rateMax = 0.0f;
+				bool active = false;
 
-			steerMin = std::min(steerMin, Snapshot.physicalSteer);
-			steerMax = std::max(steerMax, Snapshot.physicalSteer);
-			rateMin = std::min(rateMin, Snapshot.steerRate);
-			rateMax = std::max(rateMax, Snapshot.steerRate);
-			if (++ticksSinceLog < 60)
+				void reset(const TelemetrySnapshot& snapshot)
+				{
+					samples = 0;
+					steerMin = steerMax = snapshot.physicalSteer;
+					rateMin = rateMax = snapshot.steerRate;
+					active = true;
+				}
+			};
+
+			static DiagnosticWindow window;
+			if (!Settings::FFBDiagnosticLog)
+			{
+				window.active = false;
 				return;
-			ticksSinceLog = 0;
+			}
+
+			if (!window.active)
+				window.reset(Snapshot);
+
+			window.steerMin = std::min(window.steerMin, Snapshot.physicalSteer);
+			window.steerMax = std::max(window.steerMax, Snapshot.physicalSteer);
+			window.rateMin = std::min(window.rateMin, Snapshot.steerRate);
+			window.rateMax = std::max(window.rateMax, Snapshot.steerRate);
+			if (++window.samples < 60)
+				return;
+			++window.number;
 
 			spdlog::info(
-				"FFB DIAG: inGame={} speed={:.4f} physicalSteer={:.4f} steerRange=[{:.4f},{:.4f}] "
-				"steerRate={:.4f}/s rateRange=[{:.4f},{:.4f}]/s "
-				"lateral=[{:.4f},{:.4f}] combined={:.4f} driftCandidate={:.3f} "
-				"surface=[{:#x},{:#x},{:#x},{:#x}] roadCollisionType={:#x} gear={} "
-				"stateFlags={:#x} collisionByte={:#x}",
-				Snapshot.inGameplay, Snapshot.speed, Snapshot.physicalSteer, steerMin, steerMax,
-				Snapshot.steerRate, rateMin, rateMax,
-				Snapshot.lateralA, Snapshot.lateralB, Snapshot.lateralCombined, Snapshot.driftCandidate,
-				Snapshot.surface[0], Snapshot.surface[1], Snapshot.surface[2], Snapshot.surface[3],
-				Snapshot.roadCollisionType, Snapshot.gear, Snapshot.stateFlags, Snapshot.collisionByte);
+				"FFB DIAG INPUT window={} samples={} physicalSteer.cur={:.5f} "
+				"physicalSteer.range=[{:.5f},{:.5f}] steeringRate.filtered.cur={:.5f}/s "
+				"steeringRate.filtered.range=[{:.5f},{:.5f}]/s",
+				window.number, window.samples, Snapshot.physicalSteer, window.steerMin, window.steerMax,
+				Snapshot.steerRate, window.rateMin, window.rateMax);
 
-			steerMin = steerMax = Snapshot.physicalSteer;
-			rateMin = rateMax = Snapshot.steerRate;
+			spdlog::info(
+				"FFB DIAG VEHICLE window={} inGameplay={} raw.speedCandidate={:.6f} "
+				"raw.lateralA={:.6f} raw.lateralB={:.6f} derived.lateralSum={:.6f} "
+				"derived.driftHeuristic={:.4f} raw.gearCandidate={}",
+				window.number, Snapshot.inGameplay, Snapshot.speed,
+				Snapshot.lateralA, Snapshot.lateralB, Snapshot.lateralCombined, Snapshot.driftCandidate,
+				Snapshot.gear);
+
+			spdlog::info(
+				"FFB DIAG CONTACT window={} raw.wheelSurfaceMask=[0:{:#010x},1:{:#010x},2:{:#010x},3:{:#010x}] "
+				"raw.roadCollisionType={}({:#010x}) raw.stateFlags={:#010x} "
+				"raw.collisionByte={}({:#04x})",
+				window.number,
+				Snapshot.surface[0], Snapshot.surface[1], Snapshot.surface[2], Snapshot.surface[3],
+				Snapshot.roadCollisionType, Snapshot.roadCollisionType, Snapshot.stateFlags,
+				Snapshot.collisionByte, Snapshot.collisionByte);
+
+			window.reset(Snapshot);
 		}
 	}
 
@@ -147,6 +180,7 @@ namespace FFB
 		{
 			GamePlCarCtrlHook.call(car);
 			UpdateSnapshot(car);
+			UpdateConstantForce(Snapshot);
 			LogSnapshot();
 		}
 

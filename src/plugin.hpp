@@ -108,6 +108,7 @@ namespace Settings
 	extern Setting<int> VibrationMode;                     // hooks_forcefeedback.cpp
 	extern Setting<int> VibrationStrength;                 // hooks_forcefeedback.cpp
 	extern Setting<int> VibrationControllerId;             // hooks_forcefeedback.cpp
+	extern Setting<bool> FFBDiagnosticLog;                 // ffb/telemetry.cpp
 
 	extern Setting<bool> RestoreJPClarissa;                // hooks_misc.cpp
 	extern Setting<std::string> DemonwareServerOverride;   // hooks_misc.cpp

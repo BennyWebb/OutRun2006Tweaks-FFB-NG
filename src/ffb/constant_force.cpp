@@ -40,6 +40,18 @@ namespace Settings
 		"Small centre-only deadzone used to prevent force chatter.", Range<float>{ 0.0f, 0.10f } };
 	Setting<float> FFBCentreCurveExponent{ "FFB", "FFBCentreCurveExponent", 0.60f,
 		"Shapes centering force versus steering displacement.", Range<float>{ 0.20f, 2.0f } };
+	Setting<bool> FFBDriftUnload{ "FFB", "FFBDriftUnload", true,
+		"Reduces normal centering resistance as the experimental drift heuristic rises." };
+	Setting<float> FFBDriftStart{ "FFB", "FFBDriftStart", 0.20f,
+		"Drift heuristic value where centering unload begins.", Range<float>{ 0.0f, 1.0f } };
+	Setting<float> FFBDriftFull{ "FFB", "FFBDriftFull", 0.80f,
+		"Drift heuristic value where centering unload reaches maximum.", Range<float>{ 0.0f, 1.0f } };
+	Setting<float> FFBDriftAttack{ "FFB", "FFBDriftAttack", 0.15f,
+		"Drift-unload attack time constant in seconds.", Range<float>{ 0.01f, 2.0f } };
+	Setting<float> FFBDriftRelease{ "FFB", "FFBDriftRelease", 0.35f,
+		"Drift-unload release time constant in seconds.", Range<float>{ 0.01f, 2.0f } };
+	Setting<float> FFBDriftMinResistance{ "FFB", "FFBDriftMinResistance", 0.40f,
+		"Minimum retained centering resistance during a strong drift.", Range<float>{ 0.0f, 1.0f } };
 }
 
 namespace FFB
@@ -79,7 +91,15 @@ namespace FFB
 		float LastCentreDeadZone = 0.01f;
 		float LastCurveExponent = 0.60f;
 		float LastShapedSteer = 0.0f;
+		float LastRawDriftSignal = 0.0f;
+		float LastDriftStart = 0.20f;
+		float LastDriftFull = 0.80f;
+		float LastRawDriftFactor = 0.0f;
+		float SmoothedDriftFactor = 0.0f;
+		float LastDriftResistanceScale = 1.0f;
+		bool DriftTransitionActive = false;
 		constexpr Uint32 PersistentEffectLengthMs = 32767;
+		constexpr float SimulationDeltaSeconds = 1.0f / 60.0f;
 
 		SDL_HapticEffect MakeEffect(int32_t diMagnitude)
 		{
@@ -282,6 +302,66 @@ namespace FFB
 				*Game::game_start_progress_code == 65;
 		}
 
+		void ResetDriftUnload()
+		{
+			LastRawDriftFactor = 0.0f;
+			SmoothedDriftFactor = 0.0f;
+			LastDriftResistanceScale = 1.0f;
+			DriftTransitionActive = false;
+		}
+
+		void UpdateDriftUnload(float rawSignal)
+		{
+			LastRawDriftSignal = std::clamp(rawSignal, 0.0f, 1.0f);
+			LastDriftStart = Settings::FFBDriftStart;
+			LastDriftFull = std::max(Settings::FFBDriftFull.get(), LastDriftStart);
+
+			if (!Settings::FFBDriftUnload)
+			{
+				ResetDriftUnload();
+				return;
+			}
+
+			if (LastRawDriftSignal > LastDriftStart)
+			{
+				if (LastDriftFull <= LastDriftStart)
+					LastRawDriftFactor = 1.0f;
+				else
+					LastRawDriftFactor = std::clamp(
+						(LastRawDriftSignal - LastDriftStart) / (LastDriftFull - LastDriftStart), 0.0f, 1.0f);
+			}
+			else
+			{
+				LastRawDriftFactor = 0.0f;
+			}
+
+			const float timeConstant = LastRawDriftFactor > SmoothedDriftFactor
+				? Settings::FFBDriftAttack.get()
+				: Settings::FFBDriftRelease.get();
+			const float alpha = 1.0f - std::exp(-SimulationDeltaSeconds / timeConstant);
+			SmoothedDriftFactor += alpha * (LastRawDriftFactor - SmoothedDriftFactor);
+			SmoothedDriftFactor = std::clamp(SmoothedDriftFactor, 0.0f, 1.0f);
+			LastDriftResistanceScale = 1.0f +
+				(Settings::FFBDriftMinResistance.get() - 1.0f) * SmoothedDriftFactor;
+
+			constexpr float EnterThreshold = 0.10f;
+			constexpr float ExitThreshold = 0.05f;
+			if (!DriftTransitionActive && SmoothedDriftFactor >= EnterThreshold)
+			{
+				DriftTransitionActive = true;
+				if (Settings::FFBDiagnosticLog)
+					spdlog::info("FFB DRIFT: entered rawSignal={:.4f} rawFactor={:.4f} smoothedFactor={:.4f} resistanceScale={:.4f}",
+						LastRawDriftSignal, LastRawDriftFactor, SmoothedDriftFactor, LastDriftResistanceScale);
+			}
+			else if (DriftTransitionActive && SmoothedDriftFactor <= ExitThreshold)
+			{
+				DriftTransitionActive = false;
+				if (Settings::FFBDiagnosticLog)
+					spdlog::info("FFB DRIFT: exited rawSignal={:.4f} rawFactor={:.4f} smoothedFactor={:.4f} resistanceScale={:.4f}",
+						LastRawDriftSignal, LastRawDriftFactor, SmoothedDriftFactor, LastDriftResistanceScale);
+			}
+		}
+
 		void LogOutput()
 		{
 			if (!Settings::FFBDiagnosticLog)
@@ -302,12 +382,16 @@ namespace FFB
 				"normalizedSpeed={:.5f} movementRamp={:.5f} speedCurveExponent={:.3f} "
 				"curvedSpeed={:.5f} lowSpeedScale={:.4f} highSpeedScale={:.4f} "
 				"targetSpeedScale={:.4f} speedScale={:.4f} "
+				"rawDriftSignal={:.4f} driftStart={:.4f} driftFull={:.4f} driftFactor={:.4f} "
+				"smoothedDriftFactor={:.4f} driftResistanceScale={:.4f} "
 				"requestedForce={:.5f} diMagnitude={} hapticOpened={} effectCreated={} "
 				"effectRunning={} statusSupported={} lastOpen='{}' lastCreate='{}' lastUpdate='{}' lastRun='{}'",
 				DiagnosticWindow, Settings::FFBEnable.get(), LastPhysicalSteer, LastCentreDeadZone,
 				LastCurveExponent, LastShapedSteer, LastRawSpeed, LastNormalizedSpeed,
 				LastMovementRamp, LastSpeedCurveExponent, LastCurvedSpeed, LastLowSpeedScale,
-				LastHighSpeedScale, LastTargetSpeedScale, LastSpeedScale, LastRequestedForce, CurrentMagnitude,
+				LastHighSpeedScale, LastTargetSpeedScale, LastSpeedScale, LastRawDriftSignal,
+				LastDriftStart, LastDriftFull, LastRawDriftFactor, SmoothedDriftFactor,
+				LastDriftResistanceScale, LastRequestedForce, CurrentMagnitude,
 				Haptic != nullptr, EffectId >= 0,
 				reportedRunning, EffectStatusSupported, LastOpenResult, LastCreateResult,
 				LastUpdateResult, LastRunResult);
@@ -332,9 +416,11 @@ namespace FFB
 		LastCentreDeadZone = Settings::FFBCentreDeadZone;
 		LastCurveExponent = Settings::FFBCentreCurveExponent;
 		LastShapedSteer = 0.0f;
+		LastRawDriftSignal = telemetry.driftCandidate;
 
 		if (!ForceAllowed())
 		{
+			ResetDriftUnload();
 			ZeroOutput();
 			LogOutput();
 			return;
@@ -361,6 +447,7 @@ namespace FFB
 		LastTargetSpeedScale = LastLowSpeedScale +
 			(LastHighSpeedScale - LastLowSpeedScale) * LastCurvedSpeed;
 		LastSpeedScale = LastMovementRamp * LastTargetSpeedScale;
+		UpdateDriftUnload(telemetry.driftCandidate);
 
 		const float absSteer = std::abs(telemetry.physicalSteer);
 		if (absSteer > LastCentreDeadZone)
@@ -372,7 +459,8 @@ namespace FFB
 		}
 
 		LastRequestedForce = std::clamp(
-			LastShapedSteer * LastSpeedScale * Settings::FFBStrength.get(), -1.0f, 1.0f);
+			LastShapedSteer * LastSpeedScale * Settings::FFBStrength.get() * LastDriftResistanceScale,
+			-1.0f, 1.0f);
 		const auto magnitude = static_cast<int32_t>(std::lround(LastRequestedForce * 10000.0f));
 		SetMagnitude(magnitude);
 		LogOutput();

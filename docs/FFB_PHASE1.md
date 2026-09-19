@@ -35,24 +35,124 @@ the present confidence level:
 | `gear` | `+0x208` | High: physically validated against the HUD; not used by the Phase 2A force model |
 | `stateFlags`, `collisionByte` | `+0x08`, `+0x281` | Low: raw candidates logged for collision correlation |
 
-Phase 2A uses only the physically validated relative `speed` candidate. No
-lateral, drift, surface, collision or gear candidate is used to generate
-force. `lateralCombined` and `driftCandidate` are explicitly derived heuristics; every value prefixed
+The Phase 2 centering model uses the physically validated relative `speed`
+candidate. Its optional drift-unload stage now consumes `driftCandidate` only
+as an experimental attenuation input; surface, collision and gear candidates
+remain excluded from force generation. `lateralCombined` and `driftCandidate` are explicitly derived heuristics; every value prefixed
 `raw.` in the log is read directly from the documented candidate field. Raw
 values are retained so their interpretation can be confirmed or rejected
 through gameplay tests.
 
+### Drift telemetry investigation
+
+A controlled grip-versus-drift capture rejected `abs(lateralA + lateralB)` as
+a reliable drift detector: it produced a large false positive in a normal
+right-hand corner and frequently cancelled toward zero during a sustained
+drift. The richer diagnostic line therefore records each field, their sum and
+difference, magnitude relationships, signs, and unsmoothed derivatives without
+selecting a replacement detector.
+
+The strongest code-level evidence is the restored original Xbox vibration
+routine in `hooks_forcefeedback.cpp`: it reads `EVWORK_CAR+0x264` and `+0x268`
+independently and applies different sign tests. This supports treating them as
+distinct directional lateral-related values, but does not establish whether
+they represent front/rear slip, lateral velocity, acceleration, or another
+quantity. The adjacent `+0x26C` field has no identified access or semantics in
+the current, upstream, or reference source.
+
+The relevant stock vibration branch first takes the maximum surface roughness
+returned by the game's four wheel-surface lookups. Only when that value is
+greater than `0.30` does it test the lateral fields: `lateralB < +0.10`, or,
+if that is false, `lateralA > -0.10`. Its reconstructed extra motor contribution
+is diagnostic-only:
+
+```text
+surfaceBase = maxSurfaceRoughness * speed * 0.10
+
+scrubAmount = 0.10 - lateralB       when lateralB < +0.10
+scrubAmount = lateralA + 0.10       otherwise when lateralA > -0.10
+scrubAmount = 0                     otherwise
+
+stockScrubCandidate = clamp(scrubAmount, 0, 2) * speed * 0.01
+```
+
+The branch adds this candidate to the surface base for the right-motor working
+value and writes three times that result to the left-motor working value. Later
+parts of the stock routine can further modify those channels, so the logged
+values are branch contributions rather than reconstructed final motor output.
+The surface gate and directional tests do not support interpreting either raw
+field magnitude, their sum, or this branch alone as a drift detector.
+
+The proposed countersteer candidate is also diagnostic-only. Its continuous
+persistence timer resets immediately whenever the predicate becomes false:
+
+```text
+countersteerActive = abs(physicalSteer) >= 0.10 and
+                     abs(lateralSum) >= 1.50 and
+                     sign(physicalSteer) != sign(lateralSum)
+```
+
+`EVENT_DRIFT_ATTACK` is one entry in the game's global event-type enumeration,
+adjacent to Race Attack and Time Attack. Source searches found no exposed
+producer/consumer or related drift-start, drift-end, continuation, chain, or
+score event identifiers. The available evidence identifies it as the Drift
+Attack game-mode event slot, not a per-car indication that a drift has begun.
+It is therefore not hooked or treated as telemetry.
+
+### Candidate status
+
+**Rejected as production drift detectors:**
+
+- `abs(field_264 + field_268)`; grip false positives and drift cancellation.
+- Steering/lateral-sum sign opposition, including persistence; a confirmed
+  non-drift corner sustained it for 1.417 seconds, overlapping drift runs.
+
+**Investigating through neutral diagnostics:**
+
+- `EVWORK_CAR+0x1D0` and `+0x1D4`.
+- `stateFlags` bit `0x00001000`.
+- Nearby floats `+0x1C8`, `+0x1CC`, `+0x1DC`, `+0x1E0`, and `+0x26C`.
+- The unavailable retail tyre-smoke/skid trigger and drift-scoring state.
+
+**Confirmed from available code/xrefs:**
+
+- `+0x1D0` and `+0x1D4` are 32-bit floats read by the restored stock
+  vibration routine. No write xrefs or producer function are present in this
+  source tree. The reference fork's physical log observed `abs(1D0) < 0.011`
+  while `1D4` reached about `0.54`, disproving its earlier position/derivative
+  naming rather than establishing replacement semantics.
+- When `abs(1D0) > 0.0018`, stock vibration adds `speed * 0.25` to its
+  left-motor working value for a two-frame hold if `1D0 >= 0 && 1D4 < 0`, or
+  if `1D0 < 0 && 1D4 >= 0`. This is an opposing-sign-style test, but its
+  physical meaning remains unknown.
+- The stock vibration routine tests `stateFlags & 0x00001000`; when set, it
+  adds `speed * 0.5` to the right-motor working value. Available source has no
+  setter/clearer xref, so the bit cannot yet be named collision, skid, drift,
+  or contact state. The reference fork's “contact event” label was an
+  inference, not a recovered game symbol.
+- No tyre-smoke particle trigger or drift-score accumulator is present in the
+  available source. Tracing those producers requires the retail executable
+  and disassembly/debug xrefs; this repository contains neither.
+
 ## Diagnostic log format
 
-When `FFBDiagnosticLog=true`, three lines with the same `window` number are
+When `FFBDiagnosticLog=true`, five lines with the same `window` number are
 written every 60 player-car simulation updates (approximately once per
 second):
 
 ```text
 FFB DIAG INPUT window=N samples=60 physicalSteer.cur=... physicalSteer.range=[min,max] steeringRate.filtered.cur=.../s steeringRate.filtered.range=[min,max]/s
 FFB DIAG VEHICLE window=N inGameplay=... raw.speedCandidate=... raw.lateralA=... raw.lateralB=... derived.lateralSum=... derived.driftHeuristic=... raw.gearCandidate=...
+FFB DRIFT DIAG window=N speed=... steer=... A=... B=... sum=... diff=... absA=... absB=... absSum=... absDiff=... maxAbs=... minAbs=... signSteer=... signA=... signB=... signSum=... A_rate=.../s B_rate=.../s sum_rate=.../s stockRoughness=... stockSurfaceVibration=... stockScrubCandidate=... countersteerActive=... countersteerDuration=...s
+FFB FIELD DIAG window=N raw.field1D0=... range1D0=[min,max] raw.field1D4=... range1D4=[min,max] sum=... diff=... abs1D0=... abs1D4=... sign1D0=... sign1D4=... product=... rate1D0=.../s rangeRate1D0=[min,max]/s rate1D4=.../s rangeRate1D4=[min,max]/s nearby=[1C8:...,1CC:...,1DC:...,1E0:...,26C:...] range26C=[min,max] stateFlag1000=... stateFlag1000Samples=.../60
 FFB DIAG CONTACT window=N raw.wheelSurfaceMask=[0:0x...,1:0x...,2:0x...,3:0x...] raw.roadCollisionType=decimal(hex) raw.stateFlags=0x... raw.collisionByte=decimal(hex)
 ```
+
+The lateral rates are unsmoothed first differences multiplied by the fixed
+60 Hz simulation rate. They are diagnostic observations only and do not feed
+the force model. The `1D0`/`1D4` derivatives use the same unsmoothed method.
+Signs are logged as `-1`, `0`, or `+1`; ranges and the `0x1000` set-sample
+count cover every tick in the window rather than only its final sample.
 
 Wheel surface slots remain numbered because their physical wheel ordering has
 not been verified. Unknown masks and flags are printed in hexadecimal; the

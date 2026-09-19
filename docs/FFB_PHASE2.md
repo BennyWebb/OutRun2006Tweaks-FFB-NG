@@ -18,21 +18,103 @@ DirectInput update path calls `IDirectInputEffect::SetParameters` without a
 restart flag, so normal magnitude updates leave the same effect running. This remains
 standard DirectInput output and contains no Logitech protocol or HID commands.
 
-## Force model
+## Shaped centering force
 
 Only the physically validated `physicalSteer` and relative `speedCandidate`
-signals are consumed:
+signals are consumed. The original linear steering term produced useful
+centering, but small offsets near centre were sometimes too weak to return the
+wheel reliably while larger cornering angles felt unnecessarily strong. The
+steering term is now shaped before the existing speed and strength scaling:
 
 ```text
-speedScale = 0                                             when speed <= minSpeed
-speedScale = clamp((speed - minSpeed) /
-                   (fullStrengthSpeed - minSpeed), 0, 1)  otherwise
-requestedForce = clamp(physicalSteer * speedScale * strength, -1, 1)
+absSteer = abs(physicalSteer)
+
+if absSteer <= centreDeadZone:
+    shapedSteer = 0
+else:
+    normalized = clamp((absSteer - centreDeadZone) /
+                       (1 - centreDeadZone), 0, 1)
+    shapedMagnitude = pow(normalized, curveExponent)
+    shapedSteer = sign(physicalSteer) * shapedMagnitude
+
+normalizedSpeed = 0                                      when speed <= minSpeed
+normalizedSpeed = 1                                      when speed >= fullStrengthSpeed
+normalizedSpeed = clamp((speed - minSpeed) /
+                        (fullStrengthSpeed - minSpeed),
+                        0, 1)                            otherwise
+movementRamp = clamp(speed / lowSpeedRampSpeed, 0, 1)
+curvedSpeed = pow(normalizedSpeed, speedCurveExponent)
+effectiveHighSpeedScale = max(highSpeedScale, lowSpeedScale)
+targetSpeedScale = lowSpeedScale +
+                   (effectiveHighSpeedScale - lowSpeedScale) * curvedSpeed
+speedScale = movementRamp * targetSpeedScale
+requestedForce = clamp(shapedSteer * speedScale * strength, -1, 1)
 diMagnitude = round(requestedForce * 10000)
 ```
 
-If `fullStrengthSpeed <= minSpeed`, the scale changes directly to 1 above the
-minimum rather than dividing by zero. Physical testing with the G27-tool
+The centre deadzone exists only to suppress force chatter or hunting at exact
+centre; its default `0.01` is intentionally small and is separate from input
+steering deadzones. An exponent below `1.0` raises the relative force for small
+and medium displacements without changing the full-scale maximum. `1.0` is
+linear outside the centre deadzone, while values above `1.0` soften the force
+near centre. With the default exponent `0.60`, normalized values map
+approximately as follows:
+
+| Normalized steering | Shaped magnitude |
+| ---: | ---: |
+| 0.05 | 0.17 |
+| 0.10 | 0.25 |
+| 0.25 | 0.44 |
+| 0.50 | 0.66 |
+| 1.00 | 1.00 |
+
+Physical testing found that mapping speed from zero to the full configured
+strength could not satisfy both ends of the range: increasing `FFBStrength` to
+improve low-speed return made high-speed steering too heavy. Normalized speed
+is therefore mapped between independent low- and high-speed scale values. Both
+are multipliers of `FFBStrength`, so the high-speed response no longer has to
+reach the global strength maximum.
+
+`FFBMinSpeed` defaults to zero, removing the earlier artificial no-force
+region. An exponent below `1.0` raises low- and mid-speed progression, `1.0`
+is linear, and values above `1.0` reduce progression below full-strength
+speed. With the default exponent `0.50`, normalized speed maps approximately
+as follows before the configured floor and ceiling are applied:
+
+| Normalized speed | Speed scale |
+| ---: | ---: |
+| 0.05 | 0.22 |
+| 0.10 | 0.32 |
+| 0.25 | 0.50 |
+| 0.50 | 0.71 |
+| 0.75 | 0.87 |
+| 1.00 | 1.00 |
+
+The low-speed floor is not applied at full strength while stationary. A short
+`movementRamp` rises smoothly from zero to one over
+`FFBLowSpeedRampSpeed`, making force zero at genuine standstill and bringing
+the useful low-speed scale in quickly as the car moves. Once that ramp is
+complete, the defaults map curved speed from `0.30` at the low end to `0.65`
+at the high end. If the configured high scale is below the low scale, the
+effective high scale is clamped up to the low scale.
+
+With the default `FFBStrength=0.75`, this gives a maximum steering multiplier
+of `0.225` at the low-speed floor and `0.4875` at the high-speed ceiling. The
+shaped steering value still determines how much of that available multiplier
+is requested at a particular wheel angle.
+
+| Raw speed candidate | Normalized speed | Movement ramp | Final speed scale | Maximum after strength |
+| ---: | ---: | ---: | ---: | ---: |
+| 0.000 | 0.000 | 0.00 | 0.000 | 0.0000 |
+| 0.025 | 0.017 | 0.25 | 0.086 | 0.0647 |
+| 0.050 | 0.033 | 0.50 | 0.182 | 0.1365 |
+| 0.100 | 0.067 | 1.00 | 0.390 | 0.2928 |
+| 0.375 | 0.250 | 1.00 | 0.475 | 0.3563 |
+| 0.750 | 0.500 | 1.00 | 0.547 | 0.4106 |
+| 1.500 | 1.000 | 1.00 | 0.650 | 0.4875 |
+
+If `fullStrengthSpeed <= minSpeed`, normalized speed changes directly to 1
+above the minimum rather than dividing by zero. Physical testing with the G27-tool
 DirectInput driver established that a positive signed magnitude produces the
 physical force needed to oppose positive (right) steering, while a negative
 magnitude opposes negative (left) steering. The model therefore preserves the
@@ -47,15 +129,21 @@ All settings are in `[FFB]` and are live-editable in the configuration overlay:
 | Setting | Default | Overlay range | Meaning |
 | --- | ---: | ---: | --- |
 | `FFBEnable` | `false` | off/on | Enables Phase 2A output |
-| `FFBStrength` | `0.30` | `0.00..1.00` | Maximum normalized force |
-| `FFBMinSpeed` | `0.05` | `0.00..5.00` | Speed where the linear ramp begins |
-| `FFBFullStrengthSpeed` | `1.50` | `0.00..5.00` | Speed where the ramp reaches 1 |
+| `FFBStrength` | `0.75` | `0.00..1.00` | Global normalized force multiplier |
+| `FFBMinSpeed` | `0.00` | `0.00..5.00` | Speed where normalization begins |
+| `FFBFullStrengthSpeed` | `1.50` | `0.00..5.00` | Speed where normalized speed reaches 1 |
+| `FFBSpeedCurveExponent` | `0.50` | `0.20..2.00` | Normalized speed-to-force curve shape |
+| `FFBLowSpeedRampSpeed` | `0.10` | `0.01..0.50` | Speed where the standstill movement ramp reaches 1 |
+| `FFBLowSpeedScale` | `0.30` | `0.00..1.00` | Low-speed multiplier of `FFBStrength` |
+| `FFBHighSpeedScale` | `0.65` | `0.00..1.00` | High-speed multiplier of `FFBStrength`; clamped no lower than the low scale |
+| `FFBCentreDeadZone` | `0.01` | `0.00..0.10` | Small force-only deadzone around exact centre |
+| `FFBCentreCurveExponent` | `0.60` | `0.20..2.00` | Steering-to-force curve shape |
 | `FFBDiagnosticLog` | `false` | off/on | Enables one-second input, telemetry and output logs |
 
 ## Safety and lifetime
 
 Output is set to zero when FFB is disabled, the selected device is not a
-generic joystick, speed is below the threshold, the active race ends, the game
+generic joystick, the movement ramp is at standstill, the active race ends, the game
 is paused, or telemetry has not updated for 250 ms. Goal, time-up, retry and
 results states do not count as active racing. A broad simulation-tick
 watchdog handles menus where the player-car telemetry hook no longer runs.
@@ -71,7 +159,7 @@ With diagnostics enabled, the output module writes approximately once per
 second:
 
 ```text
-FFB OUTPUT window=N enabled=... speedScale=... physicalSteer=... requestedForce=... diMagnitude=... hapticOpened=... effectCreated=... effectRunning=... statusSupported=... lastOpen='...' lastCreate='...' lastUpdate='...' lastRun='...'
+FFB OUTPUT window=N enabled=... physicalSteer=... centreDeadZone=... curveExponent=... shapedSteer=... speedCandidate=... normalizedSpeed=... movementRamp=... speedCurveExponent=... curvedSpeed=... lowSpeedScale=... highSpeedScale=... targetSpeedScale=... speedScale=... requestedForce=... diMagnitude=... hapticOpened=... effectCreated=... effectRunning=... statusSupported=... lastOpen='...' lastCreate='...' lastUpdate='...' lastRun='...'
 ```
 
 Opening is retried after five seconds when SDL initially cannot match or query
@@ -88,6 +176,12 @@ periodic/sine effect, collision impulse, road texture, surface response, drift
 response, gear response, Logitech-specific code, native HID output, or custom
 wheel command. The diagnostic-only telemetry candidates remain excluded until
 physical validation supports a later phase.
+
+Physical testing also found that heavy normal high-speed centering could mask
+the game's approximately 270-degree steering boundary. Lowering the ordinary
+high-speed ceiling preserves force headroom for a separately identifiable
+soft-lock cue in a future milestone. This phase does not detect, modify, or
+generate force for that boundary.
 
 ## SDL DirectInput duration handling
 

@@ -22,12 +22,24 @@ namespace Settings
 {
 	Setting<bool> FFBEnable{ "FFB", "FFBEnable", false,
 		"Enables the experimental Phase 2A constant-force centering effect." };
-	Setting<float> FFBStrength{ "FFB", "FFBStrength", 0.30f,
+	Setting<float> FFBStrength{ "FFB", "FFBStrength", 0.75f,
 		"Maximum constant-force strength. Start low and increase cautiously.", Range<float>{ 0.0f, 1.0f } };
-	Setting<float> FFBMinSpeed{ "FFB", "FFBMinSpeed", 0.05f,
+	Setting<float> FFBMinSpeed{ "FFB", "FFBMinSpeed", 0.0f,
 		"Relative vehicle speed below which Phase 2A force is zero.", Range<float>{ 0.0f, 5.0f } };
 	Setting<float> FFBFullStrengthSpeed{ "FFB", "FFBFullStrengthSpeed", 1.50f,
 		"Relative vehicle speed at which Phase 2A reaches full configured strength.", Range<float>{ 0.0f, 5.0f } };
+	Setting<float> FFBSpeedCurveExponent{ "FFB", "FFBSpeedCurveExponent", 0.50f,
+		"Shapes centering force versus relative vehicle speed.", Range<float>{ 0.20f, 2.0f } };
+	Setting<float> FFBLowSpeedRampSpeed{ "FFB", "FFBLowSpeedRampSpeed", 0.10f,
+		"Relative speed over which centering ramps up from standstill.", Range<float>{ 0.01f, 0.50f } };
+	Setting<float> FFBLowSpeedScale{ "FFB", "FFBLowSpeedScale", 0.30f,
+		"FFB strength multiplier at low speed.", Range<float>{ 0.0f, 1.0f } };
+	Setting<float> FFBHighSpeedScale{ "FFB", "FFBHighSpeedScale", 0.65f,
+		"FFB strength multiplier at high speed.", Range<float>{ 0.0f, 1.0f } };
+	Setting<float> FFBCentreDeadZone{ "FFB", "FFBCentreDeadZone", 0.01f,
+		"Small centre-only deadzone used to prevent force chatter.", Range<float>{ 0.0f, 0.10f } };
+	Setting<float> FFBCentreCurveExponent{ "FFB", "FFBCentreCurveExponent", 0.60f,
+		"Shapes centering force versus steering displacement.", Range<float>{ 0.20f, 2.0f } };
 }
 
 namespace FFB
@@ -53,9 +65,20 @@ namespace FFB
 		SDL_JoystickID LastOpenAttemptDeviceId = 0;
 		uint32_t DiagnosticSamples = 0;
 		uint64_t DiagnosticWindow = 0;
+		float LastRawSpeed = 0.0f;
+		float LastNormalizedSpeed = 0.0f;
+		float LastSpeedCurveExponent = 0.50f;
+		float LastMovementRamp = 0.0f;
+		float LastCurvedSpeed = 0.0f;
+		float LastLowSpeedScale = 0.30f;
+		float LastHighSpeedScale = 0.65f;
+		float LastTargetSpeedScale = 0.0f;
 		float LastSpeedScale = 0.0f;
 		float LastRequestedForce = 0.0f;
 		float LastPhysicalSteer = 0.0f;
+		float LastCentreDeadZone = 0.01f;
+		float LastCurveExponent = 0.60f;
+		float LastShapedSteer = 0.0f;
 		constexpr Uint32 PersistentEffectLengthMs = 32767;
 
 		SDL_HapticEffect MakeEffect(int32_t diMagnitude)
@@ -274,11 +297,18 @@ namespace FFB
 				? SDL_GetHapticEffectStatus(Haptic, EffectId)
 				: EffectRunning;
 			spdlog::info(
-				"FFB OUTPUT window={} enabled={} speedScale={:.4f} physicalSteer={:.5f} "
+				"FFB OUTPUT window={} enabled={} physicalSteer={:.5f} centreDeadZone={:.4f} "
+				"curveExponent={:.3f} shapedSteer={:.5f} speedCandidate={:.5f} "
+				"normalizedSpeed={:.5f} movementRamp={:.5f} speedCurveExponent={:.3f} "
+				"curvedSpeed={:.5f} lowSpeedScale={:.4f} highSpeedScale={:.4f} "
+				"targetSpeedScale={:.4f} speedScale={:.4f} "
 				"requestedForce={:.5f} diMagnitude={} hapticOpened={} effectCreated={} "
 				"effectRunning={} statusSupported={} lastOpen='{}' lastCreate='{}' lastUpdate='{}' lastRun='{}'",
-				DiagnosticWindow, Settings::FFBEnable.get(), LastSpeedScale, LastPhysicalSteer,
-				LastRequestedForce, CurrentMagnitude, Haptic != nullptr, EffectId >= 0,
+				DiagnosticWindow, Settings::FFBEnable.get(), LastPhysicalSteer, LastCentreDeadZone,
+				LastCurveExponent, LastShapedSteer, LastRawSpeed, LastNormalizedSpeed,
+				LastMovementRamp, LastSpeedCurveExponent, LastCurvedSpeed, LastLowSpeedScale,
+				LastHighSpeedScale, LastTargetSpeedScale, LastSpeedScale, LastRequestedForce, CurrentMagnitude,
+				Haptic != nullptr, EffectId >= 0,
 				reportedRunning, EffectStatusSupported, LastOpenResult, LastCreateResult,
 				LastUpdateResult, LastRunResult);
 			DiagnosticSamples = 0;
@@ -289,8 +319,19 @@ namespace FFB
 	{
 		LastTelemetryMs = SDL_GetTicks();
 		LastPhysicalSteer = telemetry.physicalSteer;
+		LastRawSpeed = telemetry.speed;
+		LastNormalizedSpeed = 0.0f;
+		LastSpeedCurveExponent = Settings::FFBSpeedCurveExponent;
+		LastMovementRamp = 0.0f;
+		LastCurvedSpeed = 0.0f;
+		LastLowSpeedScale = Settings::FFBLowSpeedScale;
+		LastHighSpeedScale = std::max(Settings::FFBHighSpeedScale.get(), LastLowSpeedScale);
+		LastTargetSpeedScale = 0.0f;
 		LastSpeedScale = 0.0f;
 		LastRequestedForce = 0.0f;
+		LastCentreDeadZone = Settings::FFBCentreDeadZone;
+		LastCurveExponent = Settings::FFBCentreCurveExponent;
+		LastShapedSteer = 0.0f;
 
 		if (!ForceAllowed())
 		{
@@ -309,13 +350,29 @@ namespace FFB
 		if (telemetry.speed > minSpeed)
 		{
 			if (fullSpeed <= minSpeed)
-				LastSpeedScale = 1.0f;
+				LastNormalizedSpeed = 1.0f;
 			else
-				LastSpeedScale = std::clamp((telemetry.speed - minSpeed) / (fullSpeed - minSpeed), 0.0f, 1.0f);
+				LastNormalizedSpeed = std::clamp(
+					(telemetry.speed - minSpeed) / (fullSpeed - minSpeed), 0.0f, 1.0f);
+		}
+		LastMovementRamp = std::clamp(
+			telemetry.speed / Settings::FFBLowSpeedRampSpeed.get(), 0.0f, 1.0f);
+		LastCurvedSpeed = std::pow(LastNormalizedSpeed, LastSpeedCurveExponent);
+		LastTargetSpeedScale = LastLowSpeedScale +
+			(LastHighSpeedScale - LastLowSpeedScale) * LastCurvedSpeed;
+		LastSpeedScale = LastMovementRamp * LastTargetSpeedScale;
+
+		const float absSteer = std::abs(telemetry.physicalSteer);
+		if (absSteer > LastCentreDeadZone)
+		{
+			const float normalized = std::clamp(
+				(absSteer - LastCentreDeadZone) / (1.0f - LastCentreDeadZone), 0.0f, 1.0f);
+			const float shapedMagnitude = std::pow(normalized, LastCurveExponent);
+			LastShapedSteer = std::copysign(shapedMagnitude, telemetry.physicalSteer);
 		}
 
 		LastRequestedForce = std::clamp(
-			telemetry.physicalSteer * LastSpeedScale * Settings::FFBStrength.get(), -1.0f, 1.0f);
+			LastShapedSteer * LastSpeedScale * Settings::FFBStrength.get(), -1.0f, 1.0f);
 		const auto magnitude = static_cast<int32_t>(std::lround(LastRequestedForce * 10000.0f));
 		SetMagnitude(magnitude);
 		LogOutput();
